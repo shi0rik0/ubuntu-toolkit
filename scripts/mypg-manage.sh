@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # PostgreSQL 安全管理脚本（Ubuntu）
-# 支持 SCRAM-SHA-256、强密码生成、配置路径显示、用户权限表格
+# 新增：重置用户密码（选项 6）
 
 set -e
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 log() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -29,7 +29,6 @@ check_sudo() {
     fi
 }
 
-# ✅ 修复：只返回主版本号（如 16，而非 16.11）
 get_pg_version() {
     local version=""
     if command -v pg_config &> /dev/null; then
@@ -42,7 +41,7 @@ get_pg_version() {
     echo "$version" | grep -Eo '^[0-9]+'
 }
 
-# 🔍 显示配置文件路径
+# 🔍 显示配置文件路径（✅ 已修复 echo -e）
 show_config_paths() {
     if ! systemctl is-active --quiet postgresql; then
         warn "PostgreSQL 服务未运行，但仍尝试从默认路径检测..."
@@ -62,11 +61,10 @@ show_config_paths() {
     if [ -f "$POSTGRESQL_CONF" ] && [ -f "$PG_HBA_CONF" ]; then
         log "配置文件路径有效。"
     else
-        warn "警告：一个或多个配置文件不存在（可能未安装或路径异常）。"
+        warn "警告：一个或多个配置文件不存在。"
     fi
 }
 
-# 🔐 生成 16 位强密码
 generate_strong_password() {
     local length=16
     if command -v openssl &> /dev/null; then
@@ -76,7 +74,6 @@ generate_strong_password() {
     fi
 }
 
-# 1. 安装 PostgreSQL
 install_postgres() {
     log "正在更新软件包列表..."
     sudo apt update
@@ -87,7 +84,6 @@ install_postgres() {
     log "PostgreSQL 安装完成！"
 }
 
-# 2. 允许外网连接（scram-sha-256）
 enable_remote_access() {
     if ! systemctl is-active --quiet postgresql; then
         error "PostgreSQL 服务未运行，请先安装。"
@@ -101,7 +97,7 @@ enable_remote_access() {
     log "检测到 PostgreSQL 主版本: $PG_VERSION"
 
     if [ ! -d "$PG_CONF_DIR" ]; then
-        error "PostgreSQL 配置目录不存在: $PG_CONF_DIR，请确认安装是否成功。"
+        error "PostgreSQL 配置目录不存在: $PG_CONF_DIR"
     fi
 
     if ! grep -q "^listen_addresses" "$POSTGRESQL_CONF"; then
@@ -127,7 +123,6 @@ enable_remote_access() {
     log "配置完成！"
 }
 
-# 3. 创建用户和数据库
 create_user_db() {
     if ! systemctl is-active --quiet postgresql; then
         error "PostgreSQL 服务未运行。"
@@ -159,7 +154,6 @@ create_user_db() {
     log "用户 '$username' 和数据库 '$db_name' 创建成功！"
 }
 
-# 5. 列出所有可登录用户及其可访问的数据库（紧凑表格）
 list_users_and_dbs() {
     if ! systemctl is-active --quiet postgresql; then
         error "PostgreSQL 服务未运行，无法查询用户信息。"
@@ -186,7 +180,36 @@ list_users_and_dbs() {
     "
 }
 
-# 主菜单（0-5）
+# ✅ 新增：重置用户密码
+reset_user_password() {
+    if ! systemctl is-active --quiet postgresql; then
+        error "PostgreSQL 服务未运行，无法操作用户。"
+    fi
+
+    read -rp "请输入要重置密码的用户名: " username
+    [[ -z "$username" ]] && error "用户名不能为空。"
+
+    # 验证用户是否存在且可登录
+    if ! sudo -u postgres psql -qtA -c "SELECT 1 FROM pg_roles WHERE rolname = '$username' AND rolcanlogin = true;" | grep -q "1"; then
+        error "用户 '$username' 不存在或不是可登录角色。"
+    fi
+
+    read -rsp "请输入新密码（留空则自动生成强密码）: " password
+    echo
+
+    if [[ -z "$password" ]]; then
+        password=$(generate_strong_password)
+        echo
+        log "✅ 自动生成强密码: ${YELLOW}$password${NC}"
+        echo
+    fi
+
+    sudo -u postgres psql -q -c "ALTER USER $username PASSWORD '$password';" >/dev/null
+
+    log "用户 '$username' 的密码已成功更新！"
+}
+
+# 菜单（0-6）
 show_menu() {
     clear
     cat <<EOF
@@ -198,13 +221,13 @@ show_menu() {
 3) 创建用户和数据库
 4) 显示配置文件路径
 5) 列出用户及其可访问的数据库
+6) 重置用户密码
 0) 退出
 ------------------------------------------
 EOF
-    read -rp "请选择操作 [0-5]: " choice
+    read -rp "请选择操作 [0-6]: " choice
 }
 
-# 主程序
 main() {
     check_sudo
 
@@ -216,8 +239,9 @@ main() {
             3) create_user_db; read -n1 -rsp $'\n按任意键继续...\n' ;;
             4) show_config_paths; read -n1 -rsp $'\n按任意键返回菜单...\n' ;;
             5) list_users_and_dbs; read -n1 -rsp $'\n按任意键返回菜单...\n' ;;
+            6) reset_user_password; read -n1 -rsp $'\n按任意键返回菜单...\n' ;;
             0) echo "再见！"; exit 0 ;;
-            *) warn "无效选项，请输入 0-5 之间的数字。"; sleep 1 ;;
+            *) warn "无效选项，请输入 0-6 之间的数字。"; sleep 1 ;;
         esac
     done
 }
